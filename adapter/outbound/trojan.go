@@ -20,6 +20,7 @@ import (
 	"github.com/metacubex/mihomo/transport/shadowsocks/core"
 	"github.com/metacubex/mihomo/transport/trojan"
 	"github.com/metacubex/mihomo/transport/vmess"
+	"github.com/metacubex/mihomo/transport/xhttp"
 )
 
 type Trojan struct {
@@ -56,8 +57,22 @@ type TrojanOption struct {
 	RealityOpts       RealityOptions `proxy:"reality-opts,omitempty"`
 	GrpcOpts          GrpcOptions    `proxy:"grpc-opts,omitempty"`
 	WSOpts            WSOptions      `proxy:"ws-opts,omitempty"`
+	XhttpOpts         XhttpOptions   `proxy:"xhttp-opts,omitempty"`
 	SSOpts            TrojanSSOption `proxy:"ss-opts,omitempty"`
 	ClientFingerprint string         `proxy:"client-fingerprint,omitempty"`
+}
+
+type XhttpOptions struct {
+	Path             string            `proxy:"path,omitempty"`
+	Host             string            `proxy:"host,omitempty"`
+	Headers          map[string]string `proxy:"headers,omitempty"`
+	Mode             string            `proxy:"mode,omitempty"`               // packet-up, stream-up, stream-down, stream-one
+	MaxUploadSize    int32             `proxy:"max-upload-size,omitempty"`    // 每个 POST 请求的最大字节数
+	MinPostInterval  int32             `proxy:"min-post-interval,omitempty"`  // POST 请求之间的最小间隔（毫秒）
+	MaxBufferedPosts int               `proxy:"max-buffered-posts,omitempty"` // 最大缓冲的 POST 请求数
+	PaddingLengthMin int32             `proxy:"padding-length-min,omitempty"` // padding 最小长度
+	PaddingLengthMax int32             `proxy:"padding-length-max,omitempty"` // padding 最大长度
+	NoGRPCHeader     bool              `proxy:"no-grpc-header,omitempty"`     // 是否禁用 gRPC header
 }
 
 // TrojanSSOption from https://github.com/p4gefau1t/trojan-go/blob/v0.10.6/tunnel/shadowsocks/config.go#L5
@@ -120,6 +135,66 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 		c, err = vmess.StreamWebsocketConn(ctx, c, wsOpts)
 	case "grpc":
 		c, err = gun.StreamGunWithConn(c, t.gunTLSConfig, t.gunConfig, t.echConfig, t.realityConfig)
+	case "xhttp", "splithttp":
+		host, port, _ := net.SplitHostPort(t.addr)
+
+		xhttpOpts := &xhttp.XhttpConfig{
+			Host:              host,
+			Port:              port,
+			Path:              t.option.XhttpOpts.Path,
+			ClientFingerprint: t.option.ClientFingerprint,
+			ECHConfig:         t.echConfig,
+			Headers:           http.Header{},
+			// 高级配置
+			Mode:             t.option.XhttpOpts.Mode,
+			MaxUploadSize:    t.option.XhttpOpts.MaxUploadSize,
+			MinPostInterval:  t.option.XhttpOpts.MinPostInterval,
+			MaxBufferedPosts: t.option.XhttpOpts.MaxBufferedPosts,
+			PaddingLengthMin: t.option.XhttpOpts.PaddingLengthMin,
+			PaddingLengthMax: t.option.XhttpOpts.PaddingLengthMax,
+			NoGRPCHeader:     t.option.XhttpOpts.NoGRPCHeader,
+		}
+
+		// 设置 Host
+		if t.option.SNI != "" {
+			xhttpOpts.Host = t.option.SNI
+		}
+
+		// 设置自定义 headers
+		if len(t.option.XhttpOpts.Headers) != 0 {
+			for key, value := range t.option.XhttpOpts.Headers {
+				xhttpOpts.Headers.Add(key, value)
+			}
+		}
+
+		// 确保 Host header 被设置 (如果在 xhttp-opts 中指定了 host)
+		if t.option.XhttpOpts.Host != "" {
+			xhttpOpts.Headers.Set("Host", t.option.XhttpOpts.Host)
+		}
+
+		// 配置 TLS
+		alpn := []string{"h2", "http/1.1"}
+		if t.option.ALPN != nil {
+			alpn = t.option.ALPN
+		}
+
+		xhttpOpts.TLSConfig, err = ca.GetTLSConfig(ca.Option{
+			TLSConfig: &tls.Config{
+				NextProtos:         alpn,
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: t.option.SkipCertVerify,
+				ServerName:         t.option.SNI,
+			},
+			Fingerprint: t.option.Fingerprint,
+			Certificate: t.option.Certificate,
+			PrivateKey:  t.option.PrivateKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		// 使用 v2 实现（更完善）
+		c, err = xhttp.StreamXhttpConnV2(ctx, c, xhttpOpts)
 	default:
 		// default tcp network
 		// handle TLS
