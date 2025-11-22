@@ -193,6 +193,24 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 				grpcOpts := make(map[string]any)
 				grpcOpts["grpc-service-name"] = query.Get("serviceName")
 				trojan["grpc-opts"] = grpcOpts
+
+			case "xhttp", "splithttp":
+				xhttpOpts := make(map[string]any)
+				if host := query.Get("host"); host != "" {
+					xhttpOpts["host"] = host
+				}
+				if path := query.Get("path"); path != "" {
+					xhttpOpts["path"] = path
+				}
+				if mode := query.Get("mode"); mode != "" {
+					xhttpOpts["mode"] = mode
+				}
+				if extra := query.Get("extra"); extra != "" {
+					// extra might contain JSON encoded extra options, but for now we just keep it simple
+					// or parse specific extra fields if needed.
+					// Based on the link: extra=
+				}
+				trojan["xhttp-opts"] = xhttpOpts
 			}
 
 			if fingerprint := query.Get("fp"); fingerprint == "" {
